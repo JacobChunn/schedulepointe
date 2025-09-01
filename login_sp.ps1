@@ -9,90 +9,78 @@ if (-not $Username -or -not $Password) {
 }
 
 $loginUrl = 'https://www.schedulepointe.com/signon.aspx'
+$ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36'
 
-# 1) GET login page; keep cookies in a session
-$response = Invoke-WebRequest -Uri $loginUrl -SessionVariable session
+# 1) GET signon.aspx and keep cookies in a session
+$response = Invoke-WebRequest -Uri $loginUrl -SessionVariable session -Headers @{ 'User-Agent' = $ua }
 
-# 2) Grab the first form and fill required fields (WebForms)
-$form = $response.Forms[0]
-if (-not $form) {
-  Write-Error "Could not find a form on $loginUrl"
+$html = $response.Content
+
+function Get-Hidden {
+  param([string]$name)
+  $m = [regex]::Match($html, "name=`"$([regex]::Escape($name))`"\s+value=`"([^`"]*)`"", 'IgnoreCase')
+  if ($m.Success) { return $m.Groups[1].Value } else { return "" }
+}
+
+# 2) Extract current WebForms tokens from the HTML (PS7 has no .Forms)
+$VIEWSTATE          = Get-Hidden '__VIEWSTATE'
+$VIEWSTATEGENERATOR = Get-Hidden '__VIEWSTATEGENERATOR'
+$EVENTVALIDATION    = Get-Hidden '__EVENTVALIDATION'
+$SCRIPTMANAGER      = Get-Hidden 'ScriptManager1_HiddenField'
+
+if (-not $VIEWSTATE -or -not $EVENTVALIDATION) {
+  Write-Error "Could not extract __VIEWSTATE / __EVENTVALIDATION from $loginUrl"
   exit 1
 }
 
-# Required hidden tokens should already be present in $form.Fields
-# Add username/password and the submit control
-$form.Fields['ctl00$txtSignOn']   = $Username
-$form.Fields['ctl00$txtPassword'] = $Password
-$form.Fields['ctl00$btnSignOn2']  = 'Sign In'
-
-# Optional sanity checks (won't fail if missing)
-foreach ($f in '__VIEWSTATE','__EVENTVALIDATION','__VIEWSTATEGENERATOR','ScriptManager1_HiddenField') {
-  if (-not $form.Fields.ContainsKey($f)) {
-    Write-Verbose "Warning: form field not found: $f"
-  }
+# 3) Build the POST body (key names include $ so use quoted hashtable keys)
+$body = @{
+  'ctl00$txtSignOn'        = $Username
+  'ctl00$txtPassword'      = $Password
+  'ctl00$btnSignOn2'       = 'Sign In'
+  '__EVENTTARGET'          = ''
+  '__EVENTARGUMENT'        = ''
+  '__VIEWSTATE'            = $VIEWSTATE
+  '__VIEWSTATEGENERATOR'   = $VIEWSTATEGENERATOR
+  '__EVENTVALIDATION'      = $EVENTVALIDATION
 }
+if ($SCRIPTMANAGER) { $body['ScriptManager1_HiddenField'] = $SCRIPTMANAGER }
 
-# 3) Choose post URI without using ?? (PowerShell 5.1-safe)
-$postUri = $loginUrl
-if ($form.Action -and $form.Action.Trim().Length -gt 0) {
-  if ($form.Action.StartsWith('http')) {
-    $postUri = $form.Action
-  } else {
-    # Handle relative action
-    $postUri = [System.Uri]::new([System.Uri]$loginUrl, $form.Action).AbsoluteUri
-  }
-}
+# 4) POST back with same session (cookies)
+$postResponse = Invoke-WebRequest -Uri $loginUrl `
+  -WebSession $session -Method Post -Body $body `
+  -ContentType 'application/x-www-form-urlencoded' `
+  -Headers @{ 'User-Agent' = $ua; 'Origin'='https://www.schedulepointe.com'; 'Referer'=$loginUrl } `
+  -MaximumRedirection 10
 
-# 4) POST with the same session (cookies carried forward)
-$postResponse = Invoke-WebRequest -Uri $postUri `
-                 -WebSession $session -Method Post -Body $form.Fields -MaximumRedirection 10
-
-# Save HTML (optional)
-$outPath = Join-Path -Path (Get-Location) -ChildPath 'after.html'
+# 5) Save HTML for inspection
+$outPath = Join-Path (Get-Location) 'after.html'
 $postResponse.Content | Out-File -FilePath $outPath -Encoding utf8
-Write-Host ""
 Write-Host "Saved response to: $outPath"
 
-# --- Robust success checks ---
-
-# A) Final URL from POST
+# 6) Robust success checks:
 $finalUri = $postResponse.BaseResponse.ResponseUri.AbsoluteUri
 Write-Host "Post redirected to: $finalUri"
 
-# B) Confirm hypProfileMenu initials in POST response
-$ExpectedInitials = if ($env:SP_INITIALS) { $env:SP_INITIALS } else { ($Username.Substring(0, [Math]::Min(2, $Username.Length))).ToUpperInvariant() }
-$pattern = '<a[^>]*\bid\s*=\s*"(?:hypProfileMenu)"[^>]*>(.*?)</a>'
-$m = [regex]::Match($postResponse.Content, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-if ($m.Success -and ($m.Groups[1].Value.Trim() -eq $ExpectedInitials)) {
-  Write-Host "Login confirmed in POST: hypProfileMenu = '$($m.Groups[1].Value.Trim())'"
+# Confirm the profile initials anchor appears
+$expectedInitials = if ($env:SP_INITIALS) { $env:SP_INITIALS } else { ($Username.Substring(0,[Math]::Min(2,$Username.Length))).ToUpperInvariant() }
+$profileMatch = [regex]::Match($postResponse.Content, '<a[^>]*\bid\s*=\s*"hypProfileMenu"[^>]*>(.*?)</a>', 'IgnoreCase')
+if ($profileMatch.Success -and ($profileMatch.Groups[1].Value.Trim() -eq $expectedInitials)) {
+  Write-Host "Login confirmed via hypProfileMenu = '$($profileMatch.Groups[1].Value.Trim())'"
 } else {
-  Write-Warning "POST HTML didn't confirm initials via hypProfileMenu."
+  Write-Warning "Did not confirm initials via hypProfileMenu in POST HTML."
 }
 
-# C) Build a SAME-APP probe (stick with /V4.5 if that's where you landed)
+# Probe using the same app base (V4 vs V4.5)
 $finalUriObj = [Uri]$finalUri
-# Extract '/V4.5/' or '/V4/' prefix, default to '/V4.5/' if not found
 $baseMatch = [regex]::Match($finalUriObj.AbsolutePath, '^/(V4(?:\.5)?)/', 'IgnoreCase')
 $appBase = if ($baseMatch.Success) { "/$($baseMatch.Groups[1].Value)/" } else { "/V4.5/" }
 $probeUrl = [Uri]::new($finalUriObj, $appBase + 'Flight.NET/Home.aspx').AbsoluteUri
 
-# D) Probe with SAME session and SAME base path
-$probe = Invoke-WebRequest -Uri $probeUrl -WebSession $session -MaximumRedirection 10
+$probe = Invoke-WebRequest -Uri $probeUrl -WebSession $session -Headers @{ 'User-Agent' = $ua } -MaximumRedirection 10
 $probeFinal = $probe.BaseResponse.ResponseUri.AbsoluteUri
-Write-Host "Probe landed at: $probeFinal"
-
-# If we were not redirected to Login2, treat as success
-$redirectedToLogin = ($probeFinal -match '(?i)/V4(\.5)?/Login2\?ReturnUrl=')
-if (-not $redirectedToLogin) {
-  # Optional: confirm hypProfileMenu again from the probe HTML
-  $m2 = [regex]::Match($probe.Content, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  if ($m2.Success -and ($m2.Groups[1].Value.Trim() -eq $ExpectedInitials)) {
-    Write-Host "Login verified via probe (same app). hypProfileMenu = '$($m2.Groups[1].Value.Trim())'"
-  } else {
-    Write-Host "Login verified via probe (same app)."
-  }
+if ($probeFinal -match '(?i)/V4(\.5)?/Login2\?ReturnUrl=') {
+  Write-Warning "Probe redirected to Login2: $probeFinal"
 } else {
-  Write-Warning "Probe redirected to Login2 (different app path or session not recognized): $probeFinal"
+  Write-Host "Login verified via probe: $probeFinal"
 }
-
