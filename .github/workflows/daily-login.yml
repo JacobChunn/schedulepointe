@@ -1,0 +1,35 @@
+name: Daily SchedulePointe login
+
+on:
+  schedule:
+    # runs at 11:00 UTC every day (07:00 America/Detroit during EDT)
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}  # allow manual runs
+
+jobs:
+  login:
+    runs-on: windows-latest  # includes PowerShell (pwsh) by default
+    permissions:
+      contents: read  # recommended for checkout
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Run PowerShell login script
+        shell: pwsh
+        env:
+          SP_USERNAME: ${{ secrets.SP_USERNAME }}
+          SP_PASSWORD: ${{ secrets.SP_PASSWORD }}
+          SP_INITIALS: ${{ secrets.SP_INITIALS }}
+        run: |
+          Write-Host "Running login_sp.ps1..."
+          .\login_sp.ps1
+          Write-Host "Exit code: $LASTEXITCODE"
+
+      - name: Upload after.html artifact
+        if: always()  # upload even if the script warns/fails, for debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: after-html
+          path: |
+            after.html
