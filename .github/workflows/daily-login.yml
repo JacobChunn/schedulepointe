@@ -7,6 +7,14 @@ on:
   workflow_dispatch: {}  # allow manual runs
 
 jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: gautamkrishnar/keepalive-workflow@v2
+
   login:
     runs-on: windows-latest  # includes PowerShell (pwsh) by default
     permissions:
