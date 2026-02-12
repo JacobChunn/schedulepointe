@@ -19,7 +19,7 @@ jobs:
           NOW=$(date +%s)
           DAYS_SINCE=$(( (NOW - LAST_COMMIT_DATE) / 86400 ))
           echo "Days since last commit: $DAYS_SINCE"
-          if [ "$DAYS_SINCE" -ge 45 ]; then
+          if [ "$DAYS_SINCE" -ge 0 ]; then
             echo "Repo inactive for $DAYS_SINCE days, creating keepalive commit"
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
