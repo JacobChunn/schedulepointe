@@ -10,10 +10,24 @@ jobs:
   keepalive:
     runs-on: ubuntu-latest
     permissions:
-      actions: write
+      contents: write
     steps:
       - uses: actions/checkout@v5
-      - uses: gautamkrishnar/keepalive-workflow@v2
+      - name: Keep workflow alive with dummy commit
+        run: |
+          LAST_COMMIT_DATE=$(git log -1 --format=%ct)
+          NOW=$(date +%s)
+          DAYS_SINCE=$(( (NOW - LAST_COMMIT_DATE) / 86400 ))
+          echo "Days since last commit: $DAYS_SINCE"
+          if [ "$DAYS_SINCE" -ge 45 ]; then
+            echo "Repo inactive for $DAYS_SINCE days, creating keepalive commit"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive commit to prevent workflow disabling"
+            git push
+          else
+            echo "Repo active ($DAYS_SINCE days since last commit), no action needed"
+          fi
 
   login:
     runs-on: windows-latest  # includes PowerShell (pwsh) by default
